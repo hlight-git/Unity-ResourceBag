@@ -1,0 +1,19 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 80c8f33f6d28ee14f90d2f1502c3e097, type: 3}
+  m_Name: RegenBlueprint
+  m_EditorClassIdentifier: Hlight.ResourceBag.Samples.WithRegen::Hlight.ResourceBag.Samples.WithRegen.RegenBlueprint
+  resources:
+  - resource: {fileID: 11400000, guid: 0fb56cd69c2bfda469dc1f87557effa5, type: 2}
+    initialAmount: 0
+    maxAmount: 5
+  extraRules: []

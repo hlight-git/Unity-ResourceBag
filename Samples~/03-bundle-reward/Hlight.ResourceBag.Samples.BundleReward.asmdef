@@ -1,0 +1,17 @@
+{
+    "name": "Hlight.ResourceBag.Samples.BundleReward",
+    "rootNamespace": "Hlight.ResourceBag.Samples.BundleReward",
+    "references": [
+        "Hlight.ResourceBag.Core",
+        "Hlight.ResourceBag.Rules"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

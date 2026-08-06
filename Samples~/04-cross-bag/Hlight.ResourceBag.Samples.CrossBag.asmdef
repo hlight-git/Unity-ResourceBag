@@ -1,0 +1,16 @@
+{
+    "name": "Hlight.ResourceBag.Samples.CrossBag",
+    "rootNamespace": "Hlight.ResourceBag.Samples.CrossBag",
+    "references": [
+        "Hlight.ResourceBag.Core"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

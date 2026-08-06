@@ -1,0 +1,37 @@
+{
+  "name": "com.hlight.resource-bag",
+  "version": "1.0.0",
+  "displayName": "Resource Bag",
+  "description": "Reusable cross-genre stackable-resource management primitive (currencies, boosters, consumables). Composable via SO-based rules.",
+  "unity": "6000.0",
+  "author": {
+    "name": "Hlight"
+  },
+  "samples": [
+    {
+      "displayName": "01 - Basic Bag",
+      "description": "Minimal bag with two stackable resources (heart + coin). Add, spend, log.",
+      "path": "Samples~/01-basic-bag"
+    },
+    {
+      "displayName": "02 - With Regen",
+      "description": "Heart resource with PeriodicDeltaRule. MonoBehaviour driver calls bag.Tick.",
+      "path": "Samples~/02-with-regen"
+    },
+    {
+      "displayName": "03 - Bundle Reward",
+      "description": "Chest bundle resolves into multiple component resources via BundleResolveRule.",
+      "path": "Samples~/03-bundle-reward"
+    },
+    {
+      "displayName": "04 - Cross Bag",
+      "description": "Player bag + Event bag. Custom rule queries locator for cross-bag buff.",
+      "path": "Samples~/04-cross-bag"
+    },
+    {
+      "displayName": "05 - Enum Keyed",
+      "description": "Recommended pattern: ResourceDefinition<TKey> + enum-keyed call sites. Zero SO refs on MonoBehaviours.",
+      "path": "Samples~/05-enum-keyed"
+    }
+  ]
+}
