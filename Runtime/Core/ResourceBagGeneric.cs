@@ -31,8 +31,8 @@ namespace Hlight.ResourceBag
         public new BagBlueprint<TKey> Blueprint => _typedBlueprint;
 
         public ResourceBag(string id, BagBlueprint<TKey> blueprint, BagSnapshot snapshot = null,
-                           IBagClock clock = null, IBagServiceLocator locator = null)
-            : base(id, blueprint, snapshot, clock, locator)
+                           IBagClock clock = null, IBagInjector injector = null)
+            : base(id, blueprint, snapshot, clock, injector)
         {
             _typedBlueprint = blueprint;
         }

@@ -17,17 +17,15 @@ namespace Hlight.ResourceBag.Samples.CrossBag
 
         private void Start()
         {
-            // Dựng bag event trước rồi register, để rule của bag player tìm được nó.
             _eventBag = new ResourceBag<CrossBagResourceId>("event", eventBlueprint);
             _eventBag.Add(CrossBagResourceId.EventTicket, 1, "grant_ticket");
 
-            var locator = new TinyLocator();
-            // Đăng ký bằng kiểu gốc, không phải ResourceBag<CrossBagResourceId>: rule chỉ thấy
-            // bag của nó là ResourceBag (nó không thể biết họ key), nên nó hỏi locator bằng
-            // kiểu đó. Nếu đăng ký bằng kiểu generic thì lời hỏi trượt — và trượt im lặng.
-            locator.Register<ResourceBag>(_eventBag, "event");
+            // Nêu đích danh loại rule mình nuôi — đọc dòng này là biết ai cấp cho ai.
+            // Đẩy Func chứ không đẩy instance, nên thứ tự dựng hai bag không còn quan trọng.
+            var injector = new TinyInjector();
+            injector.Resolve<EventBuffRule.Instance>(r => r.EventBag = () => _eventBag);
 
-            _playerBag = new ResourceBag<CrossBagResourceId>("player", playerBlueprint, locator: locator);
+            _playerBag = new ResourceBag<CrossBagResourceId>("player", playerBlueprint, injector: injector);
             _playerBag.Changed += c => Debug.Log(
                 $"[Player] {c.Resource?.Id} +{c.Delta} ({c.Reason})  total={c.NewAmount}");
 
@@ -43,19 +41,21 @@ namespace Hlight.ResourceBag.Samples.CrossBag
             _eventBag?.Dispose();
         }
 
-        /// <summary>Locator tối giản cho sample. Project thật dùng locator của bạn — xem README.</summary>
-        private sealed class TinyLocator : IBagServiceLocator
+        /// <summary>
+        /// Injector tối giản cho sample. Project thật bọc DependencyInjector của mình vào
+        /// IBagInjector — một method forward, xem README.
+        /// </summary>
+        private sealed class TinyInjector : IBagInjector
         {
-            private readonly Dictionary<(Type, string), object> _byKey = new();
+            private readonly Dictionary<Type, Action<object>> _resolvers = new();
 
-            public void Register<T>(T instance, string key = null) where T : class
-                => _byKey[(typeof(T), key ?? string.Empty)] = instance;
+            public void Resolve<T>(Action<T> push) where T : class
+                => _resolvers[typeof(T)] = target => push((T)target);
 
-            public bool TryProvide<T>(out T value, string key = null) where T : class
+            public void Inject(object target)
             {
-                if (_byKey.TryGetValue((typeof(T), key ?? string.Empty), out var raw)
-                    && raw is T cast) { value = cast; return true; }
-                value = null; return false;
+                if (target != null && _resolvers.TryGetValue(target.GetType(), out var push))
+                    push(target);
             }
         }
     }

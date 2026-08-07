@@ -31,8 +31,8 @@ equipment-style instances, this isn't the package for you.
 - Remote config, in three levels: **resource lists** (rewards, costs) have a first-class
   path — `ResourceAmount` + `Grant`/`TrySpendAll`, see [Remote config](#remote-config); a
   **cap** has a runtime plug-point (`SetMaxAmount`); **rule parameters** have neither, so a
-  rule that must follow remote config pulls its provider through `Bag.Locator` (see
-  [IBagServiceLocator](#cross-bag-ibagservicelocator) for the lazy-resolve pattern). A
+  rule that must follow remote config receives its provider by push in `Attach` (see
+  [IBagInjector](#project-dependencies-in-a-rule-ibaginjector)). A
   **server-defined scope** — the resource list itself coming from the server — is still not
   supported: the constructor needs an authored blueprint.
 - No cheat detection. A clock reading behind the bag's own timeline stalls a rule
@@ -240,9 +240,9 @@ mutation if `!intent.SkipPrimary` → side effects re-enter the pipeline at `dep
 Side-effect depth is capped at 5; exceeded → log + drop. Emits `Changed` per mutation,
 including a 0-delta event when a credit is clamped at the cap (`BagReasons.Overflow`).
 
-**`IBagServiceLocator`** — Project bridge to Hlight `IServiceLocator` (or any locator).
-Rules call `bag.Locator.TryProvide(out var dep, key)` to pull cross-bag or cross-system
-deps. Lifetime is project-owned (convention 7).
+**`IBagInjector`** — Project bridge to Hlight's `DependencyInjector` (or any push injector).
+A rule's `Attach` calls `bag.Injector?.Inject(instance)` so cross-bag or cross-system deps
+land on the instance before it runs. Lifetime is project-owned (convention 7).
 
 **`IBagClock` / `BagClock`** — time source for time-dependent rules; see
 [Time model](#time-model).
@@ -269,7 +269,7 @@ instead of as package API.
 
 | Asmdef | Purpose | Depends on |
 |---|---|---|
-| `Hlight.ResourceBag.Core` | `ResourceDefinition`, `ResourceBag`, `ResourceRule`, `AttachedRule`, `BagBlueprint`, locator iface, structs, `Runtime/Clock/` (`IBagClock`, `BagClock`) | — |
+| `Hlight.ResourceBag.Core` | `ResourceDefinition`, `ResourceBag`, `ResourceRule`, `AttachedRule`, `BagBlueprint`, `IBagInjector`, structs, `Runtime/Clock/` (`IBagClock`, `BagClock`) | — |
 | `Hlight.ResourceBag.Rules` | 4 built-in rule SOs | Core |
 | `Hlight.ResourceBag.Tests` | EditMode tests | Core, Rules |
 
@@ -286,9 +286,9 @@ instead of as package API.
    `initialAmount` for a preset starting value and `maxAmount` for the cap, both 0 by default;
    use `extraRules` for blueprint-only cross-cutting rules. The resource slot only accepts defs
    of this family — the Inspector will not take anything else.
-5. **Instantiate at runtime** — `var bag = new ResourceBag<TKey>(id, blueprint, snapshot, clock, locator);`.
+5. **Instantiate at runtime** — `var bag = new ResourceBag<TKey>(id, blueprint, snapshot, clock, injector);`.
    Only `id` and `blueprint` are required; the rest default to a fresh bag, a bag-owned
-   `BagClock`, and no locator.
+   `BagClock`, and no injector.
 
 ## Persistence
 
@@ -511,36 +511,54 @@ Loot tables ("pick 1 of these 3 by weight") are a different shape — selection 
 accumulation, plus weights — and belong to the project. `BundleResolveRule` remains the
 SO-authored path for a chest whose contents designers edit in the Inspector.
 
-## Cross-bag (`IBagServiceLocator`)
+## Project dependencies in a rule (`IBagInjector`)
 
-A rule that needs to read another bag (e.g. event token affects player coin Add) pulls
-the foreign bag from the locator **once** in the AttachedRule's `OnAttach`, then
-forgets the locator:
+A rule that needs something from the project — another bag, a haptics service, remote config
+— receives it by push. `ResourceRule.Attach` is your own code and is the factory for every
+`AttachedRule`, so that is where injection belongs:
 
 ```csharp
-private sealed class Instance : AttachedRule
+public override AttachedRule Attach(ResourceBag bag, ResourceDefinition owner)
 {
-    private ResourceBag _eventBag;
+    var rule = new Instance(this, owner, bag);
+    bag.Injector?.Inject(rule);
+    if (rule.EventBag == null)                     // the rule decides what it cannot run without
+        throw new InvalidOperationException($"{name}: no resolver declared for {nameof(Instance)}.");
+    return rule;
+}
+
+public sealed class Instance : AttachedRule
+{
     public Instance(MyRule cfg, ResourceDefinition owner, ResourceBag bag) : base(cfg, owner, bag) { }
 
-    public override void OnAttach()
-    {
-        Bag.Locator?.TryProvide(out _eventBag, "event");   // key disambiguates bags-of-bags
-    }
+    public Func<ResourceBag> EventBag { get; set; }   // read on use — see below
 }
 ```
 
-See `Samples~/04-cross-bag` for a full wiring.
+The instance is configured before it runs, so it needs no locator reference and no
+"did I resolve yet" flag. See `Samples~/04-cross-bag` for a full wiring.
 
-**Register bags under the base type.** A rule sees its own bag as `ResourceBag` — it cannot
-know the key family — so that is the type it asks the locator for:
+**Push is eager — take a `Func<T>` for anything built later.** `Attach` runs inside the
+`ResourceBag` constructor, so a service that appears in a later bootstrap phase is `null` at
+that moment and stays `null`. Either construct the bag after those services exist, or push a
+factory. A `Func<T>` field says "read on use" in the rule's own signature, where the previous
+resolve-and-cache dance hid it.
+
+**There is no key.** A locator disambiguated two instances of one type with a key; push
+resolvers are per target type. Two rules needing different instances must be different target
+types, or take the difference from their own authored config.
+
+**The project bridges its injector in one method.** `IBagInjector` is declared here rather
+than taken from `com.hlight.dependency-inversion`, so neither package depends on the other:
 
 ```csharp
-locator.Register<ResourceBag>(playerBag, "player");   // even though playerBag is ResourceBag<CurrencyId>
+sealed class BagInjector : IBagInjector
+{
+    readonly DependencyInjector _injector;
+    public BagInjector(DependencyInjector injector) => _injector = injector;
+    public void Inject(object target) => _injector.Inject(target);
+}
 ```
-
-Registering under `ResourceBag<CurrencyId>` instead makes the rule's request miss, and a miss
-is silent: `TryProvide` returns false and the rule simply never does its job.
 
 ## Extending — write a custom `ResourceRule`
 
@@ -603,8 +621,9 @@ testability stay with the project).
    return `null` from `Attach` when owner is null — placing them in
    `blueprint.extraRules` silently no-ops. Cross-cutting rules with no implicit target
    can ignore this.
-7. **`IBagServiceLocator` lifetime is owned by the project.** AttachedRules pull once in
-   `OnAttach` and forget the locator — never store it as a long-lived field on the SO.
+7. **`IBagInjector` lifetime is owned by the project.** Deps land on the AttachedRule
+   instance in `Attach` — never on the rule SO, which is shared by every bag that lists it.
+   Anything built after the bag arrives as a `Func<T>`, not as an instance.
 8. **Side-effect depth is capped at 5.** Exceeded → `Debug.LogError` and the offending
    intent is dropped (no exception thrown).
 9. **`SpendOutcome.Reject` aborts everything.** Side-effects accumulated during the
@@ -647,7 +666,7 @@ Importable via Package Manager → ResourceBag → Samples. Five samples shipped
 | 01 | Basic Bag | Add / Spend / GetAmount / max-amount clamping |
 | 02 | With Regen | `PeriodicDeltaRule` + project-owned tick driver + snapshot persistence |
 | 03 | Bundle Reward | `BundleResolveRule` side-effect fan-out |
-| 04 | Cross Bag | `IBagServiceLocator` + custom buff rule |
+| 04 | Cross Bag | `IBagInjector` + custom buff rule |
 | 05 | Enum Keyed | `ResourceDefinition<TKey>` + enum-keyed call sites (recommended pattern) |
 
 Each sample folder has its own `README.md` listing the SO resources to create + expected
@@ -666,7 +685,7 @@ Packages/com.hlight.resource-bag/
 │   ├── Structs/            ResourceIntent, ResourceSideEffect, ResourceChange, SpendOutcome,
 │   │                       BagSnapshot, ResourceAmount
 │   ├── Clock/              IBagClock, BagClock
-│   └── Locator/            IBagServiceLocator
+│   └── Core/               IBagInjector
 ├── Rules/                  4 built-in rules (separate asmdef): PeriodicDeltaRule,
 │                           OverflowConvertRule, BundleResolveRule, SubstituteRule,
 │                           RoundingMode, RuleReasons

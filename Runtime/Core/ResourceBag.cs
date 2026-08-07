@@ -17,7 +17,7 @@ namespace Hlight.ResourceBag
 
         private readonly string _id;
         private readonly BagBlueprint _blueprint;
-        private readonly IBagServiceLocator _locator;
+        private readonly IBagInjector _injector;
         private readonly IBagClock _clock;
         private readonly bool _ownsClock;
 
@@ -60,8 +60,11 @@ namespace Hlight.ResourceBag
         /// </summary>
         public BagBlueprint Blueprint => _blueprint;
 
-        /// <summary>Service locator (optional) for rules that need project-side deps.</summary>
-        public IBagServiceLocator Locator => _locator;
+        /// <summary>
+        /// Injector (optional) for rules that need project-side deps. A rule's
+        /// <see cref="ResourceRule.Attach"/> pushes into the instance it just built.
+        /// </summary>
+        public IBagInjector Injector => _injector;
 
         /// <summary>Time source for time-dependent rules. Never null.</summary>
         public IBagClock Clock => _clock;
@@ -75,12 +78,12 @@ namespace Hlight.ResourceBag
         /// (owner = null).
         /// </summary>
         public ResourceBag(string id, BagBlueprint blueprint, BagSnapshot snapshot = null,
-                        IBagClock clock = null, IBagServiceLocator locator = null)
+                        IBagClock clock = null, IBagInjector injector = null)
         {
             if (blueprint == null) throw new ArgumentNullException(nameof(blueprint));
             _id = id;
             _blueprint = blueprint;
-            _locator = locator;
+            _injector = injector;
 
             // A bag always has a clock, so no rule needs a "no clock" branch. Injecting
             // one (server time) leaves ownership — and its persistence — with the project.

@@ -1,6 +1,6 @@
 ---
 name: resource-bag
-description: "Use the Hlight.ResourceBag Unity package (Packages/com.hlight.resource-bag) to model stackable, count-only resources — currencies (coin, gem), hearts/lives, boosters, consumables, event tickets. Composable behavior via ScriptableObject rules (PeriodicDelta — regen/decay, OverflowConvert, BundleResolve, Substitute). Topics: defining resources, enum-keyed access via ResourceDefinition<TKey>, BagBlueprint authoring, writing custom ResourceRule, cross-bag rules via IBagServiceLocator, persistence via BagSnapshot (constructor load + SaveTo), server-time clocks via IBagClock, tick driver pattern, side-effect depth, TrySpendAll atomicity. Trigger when user mentions ResourceBag, BagBlueprint, ResourceDefinition, ResourceRule, PeriodicDeltaRule, currencies, hearts, boosters, stackable inventory — even if they don't name the package."
+description: "Use the Hlight.ResourceBag Unity package (Packages/com.hlight.resource-bag) to model stackable, count-only resources — currencies (coin, gem), hearts/lives, boosters, consumables, event tickets. Composable behavior via ScriptableObject rules (PeriodicDelta — regen/decay, OverflowConvert, BundleResolve, Substitute). Topics: defining resources, enum-keyed access via ResourceDefinition<TKey>, BagBlueprint authoring, writing custom ResourceRule, cross-bag rules via IBagInjector (push), persistence via BagSnapshot (constructor load + SaveTo), server-time clocks via IBagClock, tick driver pattern, side-effect depth, TrySpendAll atomicity. Trigger when user mentions ResourceBag, BagBlueprint, ResourceDefinition, ResourceRule, PeriodicDeltaRule, currencies, hearts, boosters, stackable inventory — even if they don't name the package."
 version: 1.0.0
 argument-hint: "[task — e.g. 'add currency', 'enable regen', 'persist bag', 'custom rule', 'cross-bag buff', 'server time']"
 ---
@@ -39,7 +39,7 @@ ResourceDefinition<TKey> (abstract SO)   BagBlueprint<TKey> (abstract SO)
         │ Attach(bag, owner)        ┌────────────────────────────────────────┐
         ▼                           │  ResourceBag (runtime, pure C#)            │
 ResourceRule (abstract SO, factory)    │  ├── ctor(id, blueprint, snapshot?,     │
-        │                           │  │       clock?, locator?) — loads     │
+        │                           │  │       clock?, injector?) — loads     │
         │ produces                  │  │       snapshot inline, no Changed   │
         ▼                           │  ├── Add / TrySpend / TrySpendAll      │
 AttachedRule (per-bag instance)     │  ├── GetAmount / HasAtLeast / Reset    │
@@ -268,7 +268,7 @@ public class FirstPurchaseBonusRule : ResourceRule
 
 ## Core task 7 — Cross-bag rules (event ticket affects player coin add)
 
-Project supplies an `IBagServiceLocator` implementation. Pull foreign deps once in `OnAttach`, then forget the locator:
+Project supplies an `IBagInjector`. Push deps in `Attach` — it is the project's own factory for every `AttachedRule`, so that is the injection point:
 
 ```csharp
 public class EventBuffRule : ResourceRule
@@ -277,39 +277,44 @@ public class EventBuffRule : ResourceRule
     [SerializeField] private int _multiplier = 2;
 
     public override AttachedRule Attach(ResourceBag bag, ResourceDefinition owner)
-        => owner != null ? new Instance(this, owner, bag) : null;
+    {
+        if (owner == null) return null;
 
-    private sealed class Instance : AttachedRule
+        var rule = new Instance(this, owner, bag);
+        bag.Injector?.Inject(rule);                  // no-op if nothing resolves this type
+        return rule;
+    }
+
+    public sealed class Instance : AttachedRule          // public: the scope names it in its resolver
     {
         private readonly EventBuffRule _cfg;
-        private ResourceBag _eventBag;
 
         public Instance(EventBuffRule cfg, ResourceDefinition owner, ResourceBag bag) : base(cfg, owner, bag) { _cfg = cfg; }
 
-        public override void OnAttach()
-        {
-            Bag.Locator?.TryProvide(out _eventBag, "event"); // key disambiguates
-        }
-        // NOTE the requested type is the base ResourceBag — a rule cannot know the foreign
-        // bag's family. So register bags as ResourceBag, not ResourceBag<TKey>, or this
-        // request misses and the rule silently does nothing.
+        // Func, not an instance: Attach runs inside the ResourceBag constructor, so a bag
+        // built later would arrive null and stay null. The field type says "read on use".
+        public Func<ResourceBag> EventBag { get; set; }
 
         public override void OnBeforeAdd(ref ResourceIntent intent, List<ResourceSideEffect> sideEffects)
         {
             if (intent.Resource != Owner) return;
-            if (_eventBag == null || _eventBag.GetAmount(_cfg._eventTicket) < 1) return;
+            var eventBag = EventBag?.Invoke();
+            if (eventBag == null || eventBag.GetAmount(_cfg._eventTicket) < 1) return;
             intent.Delta *= _cfg._multiplier;
         }
     }
 }
 
-// Wiring
-var eventBag = new ResourceBag<EventId>("event", eventBlueprint);
-locator.Register<ResourceBag>(eventBag, "event");     // base type — rules ask for ResourceBag
-var playerBag = new ResourceBag<CurrencyId>("player", playerBlueprint, locator: locator);
+// Wiring — the scope names the rule type out loud, so who-feeds-what is readable in one place
+public sealed partial class GameScope : IDependencyResolvable<EventBuffRule.Instance>
+{
+    public void ResolveDependenciesFor(EventBuffRule.Instance t) => t.EventBag = () => _eventBag;
+}
+
+var playerBag = new ResourceBag<CurrencyId>("player", playerBlueprint, injector: bagInjector);
 ```
 
-See `Samples~/04-cross-bag` for a full wiring with `TinyLocator`.
+See `Samples~/04-cross-bag` for a full wiring with `TinyInjector`.
 
 ## Core task 8 — Server time
 
@@ -505,7 +510,7 @@ Project reason strings should NOT start with `_`.
 
 11. **`Dispose()` is mandatory.** Detaches all rules in reverse order, nulls `Changed`, and disposes an owned `BagClock`'s focus-change subscription. An injected clock is left untouched — its owner disposes it. Skip `Dispose()` and rules' OnDetach hooks leak; subscribers leak.
 
-12. **Locator pulled ONCE in OnAttach, never stored on the SO.** Storing `IBagServiceLocator` as an SO field defeats the per-bag binding. Pull `locator.TryProvide(out _eventBag, "event")` in `OnAttach`, then forget the locator.
+12. **Deps are pushed onto the AttachedRule instance in `Attach`, never onto the rule SO.** The SO is shared by every def and every bag that lists it, so a dep parked there is shared too. Anything constructed after the bag arrives as a `Func<T>` — `Attach` runs inside the `ResourceBag` constructor, so an instance captured there is whatever existed at that moment.
 
 13. **`BundleResolveRule` placement matters.** It sets `SkipPrimary` and emits side-effects sized by `intent.Delta`. If a rule earlier in `def.Rules[]` inflates `intent.Delta` first (e.g. a multiplier buff recipe), the inflated amount feeds into the bundle expansion — usually wrong unless that's deliberately wanted. Default: put bundle rules at index 0 of `def.Rules[]`.
 
@@ -559,14 +564,14 @@ Project reason strings should NOT start with `_`.
 | `Runtime/Core/BagReasons.cs` | Well-known reason strings (Core) |
 | `Runtime/Clock/IBagClock.cs` | Time source contract |
 | `Runtime/Clock/BagClock.cs` | Default `IBagClock` — anchor/ratchet/offline cap |
-| `Runtime/Locator/IBagServiceLocator.cs` | Cross-bag bridge contract |
+| `Runtime/Core/IBagInjector.cs` | Push-DI bridge contract |
 | `Runtime/Structs/` | `ResourceIntent`, `ResourceSideEffect`, `ResourceChange`, `SpendOutcome`, `BagSnapshot`, `ResourceAmount` |
 | `Rules/` | 4 built-in rule SOs + `RoundingMode`, `RuleReasons` |
 | `Tests/` | EditMode tests — basic ops, pipeline, tick, clock, attach/detach, dispose, each rule, persistence |
 | `Samples~/01-basic-bag/` | Add / Spend / GetAmount, max-amount clamping |
 | `Samples~/02-with-regen/` | `PeriodicDeltaRule` + project-owned Tick driver + snapshot persistence |
 | `Samples~/03-bundle-reward/` | BundleResolveRule fan-out |
-| `Samples~/04-cross-bag/` | Locator + custom buff rule reading event bag |
+| `Samples~/04-cross-bag/` | Injector + custom buff rule reading event bag |
 | `Samples~/05-enum-keyed/` | `ResourceDefinition<TKey>` + enum-keyed call sites (recommended) |
 
 ---
@@ -588,7 +593,7 @@ Need a behavior on this resource?
   │
   ├─ One of the 4 built-ins fits? → Drop SO into ResourceDefinition.Rules[]
   ├─ Custom behavior?             → Subclass ResourceRule; state in nested AttachedRule subclass
-  └─ Cross-bag behavior?          → Subclass ResourceRule; pull foreign bag via Bag.Locator in OnAttach
+  └─ Cross-bag behavior?          → Subclass ResourceRule; push foreign bag into the instance in Attach
 
 Resource list comes from remote config (reward, cost, IAP payload)?
   │

@@ -1,57 +1,62 @@
-# 04 — Bag đọc state của bag khác
+# 04 — Cross Bag
 
-Bag người chơi nhân đôi coin khi bag Event còn vé, thông qua Service Locator của project.
+Bag người chơi nhân đôi coin khi bag Event còn vé, thông qua injector của project.
 
-## Chạy
+Kéo `CrossBagSample.prefab` vào scene, bấm Play và xem Console.
 
-Kéo **`CrossBagSample.prefab`** vào scene → bấm Play.
+## Nối vào DI của bạn — một method
 
-```
-[Player] Coin +200 (quest_reward)      // nhân đôi vì đang giữ 1 vé
-[Player] Coin +100 (quest_reward_2)    // đã tiêu vé → hết buff
-```
-
-## Nối vào Service Locator của bạn — 0 dòng code
-
-`IBagServiceLocator.TryProvide` có signature **giống hệt** `AServiceLocator.TryProvide` của `com.hlight.dependency-inversion`. Nên không cần adapter:
+`IBagInjector` chỉ có một verb, nên cầu nối tới `DependencyInjector` của
+`com.hlight.dependency-inversion` là một dòng forward:
 
 ```csharp
-public sealed class GameServiceLocator : AServiceLocator, IBagServiceLocator { }
-```
-
-Khai báo ở **lớp con phía project**, đừng thêm vào `AServiceLocator` — asmdef của package DI không reference gì, thêm vào đó sẽ buộc nó phụ thuộc ResourceBag.
-
-## Resolve lúc nào — chỗ dễ sai nhất
-
-**Resolve lần đầu dùng, không resolve trong `OnAttach`.**
-
-`OnAttach` chạy **trong constructor của `ResourceBag`**. Resolve ở đó đòi mọi dependency phải register **trước khi** bag được dựng. Đúng với bag anh em bạn tự dựng (như sample này), **sai** với service register ở bootstrap phase sau hoặc scope chưa tồn tại — những cái đó thành `null` **vĩnh viễn và im lặng**.
-
-```csharp
-private IBonusPolicy _policy;
-private bool _resolved;
-
-private IBonusPolicy Policy
+sealed class BagInjector : IBagInjector
 {
-    get
-    {
-        if (_resolved) return _policy;
-        _resolved = Bag.Locator != null && Bag.Locator.TryProvide(out _policy);
-        return _policy;   // null tới khi được register, rồi lần sau bắt được
-    }
+    readonly DependencyInjector _injector;
+    public BagInjector(DependencyInjector injector) => _injector = injector;
+    public void Inject(object target) => _injector.Inject(target);
 }
 ```
 
-Giữ reference locator ở đây là **đúng**. `Tests/Core/ResourceBagLocatorTests.cs` có test chứng minh pattern eager bỏ mất dependency register muộn.
+Khai ở **phía project**, đừng đưa `IBagInjector` vào package DI — asmdef của nó không
+reference gì, thêm vào sẽ buộc một package DI phổ dụng phụ thuộc ResourceBag.
 
-## Resource trong folder
+## Dependency đi vào rule ở đâu
 
-| Resource | Là gì |
-|---|---|
-| `CoinDef`, `EventTicketDef` | `CrossBagDef` |
-| `PlayerBuffRule` | `EventBuffRule` — nhân 2 khi bag "event" còn vé |
-| `PlayerBlueprint` | Coin + EventTicket |
-| `EventBlueprint` | Chỉ EventTicket |
-| `CrossBagSample.prefab` | Đã nối sẵn (chỉ 2 blueprint) |
+`Attach` — đó là factory của rule, và nó là code của bạn:
 
-Rule phải nằm trong `Rules` của **CoinDef** — owner là thứ cho rule biết nó buff cái gì. Đặt vào `ExtraRules` của blueprint thì `Attach` trả `null` và rule **im lặng không làm gì**.
+```csharp
+public override AttachedRule Attach(ResourceBag bag, ResourceDefinition owner)
+{
+    if (owner == null) return null;
+
+    var rule = new Instance(this, owner, bag);
+    bag.Injector?.Inject(rule);
+    return rule;
+}
+```
+
+Phía scope nêu đích danh loại rule mình nuôi, nên đọc một file là biết ai cấp cho ai:
+
+```csharp
+public sealed partial class GameScope : IDependencyResolvable<EventBuffRule.Instance>
+{
+    public void ResolveDependenciesFor(EventBuffRule.Instance t) => t.EventBag = () => _eventBag;
+}
+```
+
+## Vì sao là `Func<ResourceBag>` chứ không phải `ResourceBag`
+
+`Attach` chạy **bên trong constructor** của `ResourceBag`. Bag "event" có thể được dựng sau
+bag "player", và nếu resolver đẩy vào một instance thì rule giữ lại đúng cái nó thấy ở thời
+điểm đó — thường là `null`, vĩnh viễn.
+
+Đẩy `Func` thì thứ tự dựng hết quan trọng, và điều đó **lộ ra ở kiểu của field** — trước đây
+nó nằm ẩn trong cờ "đã resolve chưa" bên trong rule. `Tests/Core/ResourceBagInjectionTests.cs`
+có test cho cả hai chiều: bản đẩy instance bỏ mất dependency sinh muộn, bản đẩy `Func` thì không.
+
+## Không còn key
+
+Locator cũ phân biệt hai bag cùng kiểu bằng key (`"event"` vs `"player"`). Resolver push là
+per target type nên không có key — nhưng cũng không cần: resolver đã nêu tên chính xác loại
+rule nó cấp, và mỗi rule biết nó muốn bag nào.
