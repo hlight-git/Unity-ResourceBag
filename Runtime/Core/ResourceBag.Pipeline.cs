@@ -10,8 +10,23 @@ namespace Hlight.ResourceBag
         public void Add(ResourceDefinition resource, int amount, string reason = BagReasons.Unspecified)
         {
             if (resource == null || amount <= 0) return;
-            var intent = new ResourceIntent(resource, amount, reason);
-            ChangeInternal(ref intent, _depth, out _);
+
+            BeginTransaction();
+            var reached = false;
+            try
+            {
+                var intent = new ResourceIntent(resource, amount, reason);
+                ChangeInternal(ref intent, _depth, out _);
+                reached = true;                    // a credit has no failure mode of its own
+            }
+            finally
+            {
+                // finally, not a straight call: a rule that throws would otherwise leave the
+                // transaction open forever, and from then on every write would sit in the
+                // tentative layer unwritten while every event stayed buffered — a bag that
+                // looks alive and silently stops recording anything.
+                EndTransaction(reached);
+            }
         }
 
         /// <summary>
@@ -22,41 +37,63 @@ namespace Hlight.ResourceBag
         public bool TrySpend(ResourceDefinition resource, int amount, string reason = BagReasons.Unspecified)
         {
             if (resource == null || amount <= 0) return false;
-            var intent = new ResourceIntent(resource, -amount, reason);
-            ChangeInternal(ref intent, _depth, out var success);
+
+            BeginTransaction();
+            var success = false;
+            try
+            {
+                var intent = new ResourceIntent(resource, -amount, reason);
+                ChangeInternal(ref intent, _depth, out success);
+            }
+            finally
+            {
+                // A failed debit takes its rules' side effects down with it — before the
+                // tentative layer those landed anyway whenever the failure was a short balance
+                // rather than an outright Reject, so a spend that did not happen could still pay
+                // out. A throwing rule counts as a failure for the same reason.
+                EndTransaction(success);
+            }
+
             return success;
         }
 
         /// <summary>
-        /// All-or-nothing multi-debit. Amounts are snapshotted first; if any entry fails
-        /// they are restored, emitting <see cref="BagReasons.Restored"/> per resource.
+        /// All-or-nothing multi-debit: every entry runs against a tentative state, and the whole
+        /// set is written only if all of them clear. A failure writes nothing and announces
+        /// nothing — no debit-then-restore, no events for amounts that never settled.
         /// </summary>
         /// <remarks>
-        /// The snapshot is taken even for a single entry. A lone entry that fails on
-        /// insufficient balance rather than <see cref="SpendOutcome.Reject"/> has already
-        /// let its rules' side effects run, so there is still something to undo.
+        /// The entries genuinely run rather than being pre-checked against balances, because
+        /// balances do not decide the outcome: a rule may substitute another resource, wave the
+        /// cost through, or reject a spend the balance could afford. Running them on a tentative
+        /// layer is what makes "can all of this be spent together?" answerable — including when
+        /// two entries compete for the same substitute, where the answer depends on order.
         /// </remarks>
         public bool TrySpendAll(IReadOnlyList<(ResourceDefinition resource, int amount)> items,
                                 string reason = BagReasons.Unspecified)
         {
             if (items == null || items.Count == 0) return true;
 
-            var snapshot = SnapshotAmounts();
-
-            for (int i = 0; i < items.Count; i++)
+            BeginTransaction();
+            var all = false;
+            try
             {
-                var (resource, amount) = items[i];
-                if (resource == null || amount <= 0) continue;
-                var intent = new ResourceIntent(resource, -amount, reason);
-                ChangeInternal(ref intent, _depth, out var success);
-                if (!success)
+                for (int i = 0; i < items.Count; i++)
                 {
-                    RestoreFromSnapshot(snapshot, BagReasons.Restored);
-                    return false;
+                    var (resource, amount) = items[i];
+                    if (resource == null || amount <= 0) continue;
+                    var intent = new ResourceIntent(resource, -amount, reason);
+                    ChangeInternal(ref intent, _depth, out var success);
+                    if (!success) return false;    // finally discards the tentative writes
                 }
-            }
 
-            return true;
+                all = true;
+                return true;
+            }
+            finally
+            {
+                EndTransaction(all);
+            }
         }
 
         private void ChangeInternal(ref ResourceIntent intent, int depth, out bool success)
@@ -178,7 +215,7 @@ namespace Hlight.ResourceBag
                     return;
                 }
 
-                _amounts[resource] = clamped;
+                SetAmount(resource, clamped);
                 FireChanged(new ResourceChange(resource, accepted, current, clamped, reason));
                 return;
             }
@@ -187,7 +224,7 @@ namespace Hlight.ResourceBag
             if (next < 0) next = 0;
             var actual = current - next;
             if (actual <= 0) return;
-            _amounts[resource] = next;
+            SetAmount(resource, next);
             FireChanged(new ResourceChange(resource, -actual, current, next, reason));
         }
     }

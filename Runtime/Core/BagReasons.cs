@@ -7,9 +7,6 @@ namespace Hlight.ResourceBag
     /// </summary>
     public static class BagReasons
     {
-        /// <summary>Amount restored by a TrySpendAll rollback.</summary>
-        public const string Restored = "_restored";
-
         /// <summary>A credit hit the cap; the surplus was clamped.</summary>
         public const string Overflow = "_overflow";
 

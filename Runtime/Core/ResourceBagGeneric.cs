@@ -66,6 +66,13 @@ namespace Hlight.ResourceBag
             return TrySpendAll(mapped, reason);
         }
 
+        /// <summary>
+        /// Subscribe to changes of one resource; returns the unsubscribe call. See
+        /// <see cref="ResourceBag.Bind(ResourceDefinition, Action{int})"/> — nothing is pushed
+        /// at subscribe time, and a failed transaction never reaches the handler.
+        /// </summary>
+        public Action Bind(TKey key, Action<int> onChanged) => Bind(Resolve(key), onChanged);
+
         public int GetAmount(TKey key) => GetAmount(Resolve(key));
 
         public bool HasAtLeast(TKey key, int amount) => HasAtLeast(Resolve(key), amount);

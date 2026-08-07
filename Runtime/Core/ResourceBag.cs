@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Pool;
 
 namespace Hlight.ResourceBag
 {
@@ -22,6 +23,17 @@ namespace Hlight.ResourceBag
 
         // Pre-sized to blueprint resource count → skip dictionary re-bucketing during boot.
         private readonly Dictionary<ResourceDefinition, int> _amounts;
+
+        // Tentative writes of the open transaction, and the events they produced. Both are
+        // empty outside a transaction, and both are reused rather than reallocated.
+        private readonly Dictionary<ResourceDefinition, int> _pending =
+            new Dictionary<ResourceDefinition, int>();
+        private readonly List<ResourceChange> _pendingEvents = new List<ResourceChange>(8);
+
+        // Open-transaction depth. A rule that calls back into a public entry point nests; only
+        // the outermost scope commits or discards, which is what makes the whole multi-spend
+        // all-or-nothing rather than each item independently.
+        private int _tx;
         // Seeded from the blueprint's entries, then mutated by SetMaxAmount. One source, so
         // GetMaxAmount is a single lookup with no fallback chain to reason about.
         private readonly Dictionary<ResourceDefinition, int> _caps;
@@ -141,7 +153,7 @@ namespace Hlight.ResourceBag
         }
 
         // Restore is silent by design: no subscriber can exist during construction, and
-        // a boot-time burst of Restored events is noise the UI would only have to filter.
+        // a boot-time burst of restore events is noise the UI would only have to filter.
         private void ApplySnapshot(BagSnapshot snapshot)
         {
             if (snapshot.Version > BagSnapshot.CurrentVersion)
@@ -196,11 +208,26 @@ namespace Hlight.ResourceBag
         private static string StateKeyOf(AttachedRule rule)
             => string.Concat(rule.Owner != null ? rule.Owner.Id : "_", ":", rule.StateKey);
 
-        /// <summary>Current amount of <paramref name="resource"/> (0 if untracked).</summary>
+        /// <summary>
+        /// Current amount of <paramref name="resource"/> (0 if untracked). Inside an open
+        /// transaction this reports the **tentative** amount, so a rule deciding mid-transaction
+        /// sees what earlier steps of that same transaction already spent or credited.
+        /// </summary>
         public int GetAmount(ResourceDefinition resource)
         {
             if (resource == null) return 0;
+            if (_tx > 0 && _pending.TryGetValue(resource, out var tentative)) return tentative;
             return _amounts.TryGetValue(resource, out var v) ? v : 0;
+        }
+
+        // The single write funnel. Inside a transaction nothing touches _amounts: writes land in
+        // the tentative layer and are folded in at commit, or dropped entirely on failure. That
+        // is what makes a failed multi-spend leave no trace — no debit-then-restore, and no
+        // events for changes that did not survive.
+        private void SetAmount(ResourceDefinition resource, int value)
+        {
+            if (_tx > 0) _pending[resource] = value;
+            else _amounts[resource] = value;
         }
 
         /// <summary>True if amount of <paramref name="resource"/> ≥ <paramref name="amount"/>.</summary>
@@ -233,8 +260,37 @@ namespace Hlight.ResourceBag
             if (resource == null) return;
             var old = GetAmount(resource);
             if (old == 0) return;
-            _amounts[resource] = 0;
+            SetAmount(resource, 0);
             FireChanged(new ResourceChange(resource, -old, old, 0, reason));
+        }
+
+        /// <summary>
+        /// Subscribe to changes of one resource. Returns the unsubscribe call — hold it and
+        /// invoke it in <c>OnDestroy</c>:
+        /// <code>
+        /// _unbind = bag.Bind(coinDef, amount =&gt; label.text = amount.ToString());
+        /// </code>
+        /// </summary>
+        /// <remarks>
+        /// Fires only when the amount actually moved: a clamped credit reports a zero delta to
+        /// <see cref="Changed"/> (for analytics) but is not a change to bind against. Nothing is
+        /// pushed at subscribe time — read <see cref="GetAmount"/> for the current value.
+        /// <para>
+        /// Because events are buffered until a transaction commits, a handler here never sees a
+        /// value that was rolled back, and never runs at all for a failed multi-spend.
+        /// </para>
+        /// </remarks>
+        public Action Bind(ResourceDefinition resource, Action<int> onChanged)
+        {
+            if (resource == null || onChanged == null) return static () => { };
+
+            void Handler(ResourceChange change)
+            {
+                if (change.Resource == resource && change.Delta != 0) onChanged(change.NewAmount);
+            }
+
+            Changed += Handler;
+            return () => Changed -= Handler;
         }
 
         /// <summary>
@@ -359,6 +415,9 @@ namespace Hlight.ResourceBag
             }
             _rules.Clear();
             _amounts.Clear();
+            _pending.Clear();
+            _pendingEvents.Clear();
+            _tx = 0;
             _caps.Clear();
             Changed = null;
             if (_ownsClock && _clock is IDisposable disposableClock) disposableClock.Dispose();
@@ -366,49 +425,64 @@ namespace Hlight.ResourceBag
 
         private void FireChanged(ResourceChange change)
         {
+            // Inside a transaction the change has not survived yet, so it is buffered rather
+            // than announced. Subscribers must never see a value that a later step undoes.
+            if (_tx > 0) { _pendingEvents.Add(change); return; }
             Changed?.Invoke(change);
         }
 
-        // Internal snapshot/restore for atomic TrySpendAll rollback. Captures amounts only,
-        // keyed by ResourceDefinition reference rather than by string id.
-        private Dictionary<ResourceDefinition, int> SnapshotAmounts()
-        {
-            return new Dictionary<ResourceDefinition, int>(_amounts);
-        }
+        // ------------------------------- Transactions -------------------------------
+        //
+        // Every public mutation runs inside one. Rules still execute for real — substitution,
+        // a free pass, a rejection, side effects — but their writes land in the tentative layer
+        // and reads see that layer, so "can all of this be spent together?" is answered by
+        // running it, not by guessing from balances, and a failure leaves nothing behind.
 
-        private void RestoreFromSnapshot(Dictionary<ResourceDefinition, int> snapshot, string reason)
+        private void BeginTransaction() => _tx++;
+
+        /// <summary>
+        /// Closes the innermost scope. Only the outermost one settles: a nested failure (a rule
+        /// calling back into a public entry point) reports false to its own caller without
+        /// killing the outer transaction, exactly as before — but if the outer one fails, its
+        /// writes go too.
+        /// </summary>
+        private void EndTransaction(bool commit)
         {
-            foreach (var kv in snapshot)
+            if (--_tx > 0) return;
+
+            if (!commit)
             {
-                var def = kv.Key;
-                var old = GetAmount(def);
-                if (old == kv.Value) continue;
-                _amounts[def] = kv.Value;
-                FireChanged(new ResourceChange(def, kv.Value - old, old, kv.Value, reason));
+                _pending.Clear();
+                _pendingEvents.Clear();
+                return;
             }
 
-            // Pre-seeding makes this the common case, so the scan below is normally skipped.
-            if (_amounts.Count == snapshot.Count) return;
+            foreach (var kv in _pending) _amounts[kv.Key] = kv.Value;
+            _pending.Clear();
 
-            // But _amounts is NOT closed over the blueprint entries: a rule credits whatever def its
-            // own serialized fields point at (OverflowConvertRule.convertTo,
-            // BundleResolveRule entries), and nothing validates those against the blueprint. So a
-            // side effect can create a key after the snapshot was taken, and TrySpendAll is only
-            // atomic if those keys are zeroed too.
-            List<ResourceDefinition> toReset = null;
-            foreach (var kv in _amounts)
-            {
-                if (!snapshot.ContainsKey(kv.Key)) (toReset ??= new List<ResourceDefinition>()).Add(kv.Key);
-            }
-            if (toReset == null) return;
+            if (_pendingEvents.Count == 0) return;
 
-            for (int i = 0; i < toReset.Count; i++)
+            // Announce after the state is final, and from a copy: a handler is allowed to call
+            // back into the bag, which opens a new transaction and would otherwise clear the
+            // list being iterated. Pooled, so this costs nothing in steady state.
+            using (ListPool<ResourceChange>.Get(out var settled))
             {
-                var def = toReset[i];
-                var old = _amounts[def];
-                if (old == 0) continue;
-                _amounts[def] = 0;
-                FireChanged(new ResourceChange(def, -old, old, 0, reason));
+                settled.AddRange(_pendingEvents);
+                _pendingEvents.Clear();
+
+                // Dispatch at an elevated depth. A handler is allowed to call back into the
+                // bag, and that re-entry has to stay bounded by MaxSideEffectDepth exactly as a
+                // rule's side effect is — while events fired mid-pipeline that came for free,
+                // announcing them after the commit would otherwise recurse until the stack dies.
+                _depth++;
+                try
+                {
+                    for (int i = 0; i < settled.Count; i++) Changed?.Invoke(settled[i]);
+                }
+                finally
+                {
+                    _depth--;
+                }
             }
         }
     }

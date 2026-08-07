@@ -129,7 +129,7 @@ namespace Hlight.ResourceBag.Tests
         }
 
         [Test]
-        public void TrySpendAll_Rollback_RestoresSideEffectAssetToo()
+        public void TrySpendAll_Failure_LeavesNoTraceAndNoEvents()
         {
             var gold = Track(TestResourceDefinition.Create(TestResourceId.Gold));
             var gem = Track(TestResourceDefinition.Create(TestResourceId.Gem));
@@ -139,15 +139,17 @@ namespace Hlight.ResourceBag.Tests
             bag.Add(gold, 10, "seed");
             bag.Add(gem, 10, "seed");
 
-            var restored = new List<ResourceChange>();
-            bag.Changed += c => { if (c.Reason == BagReasons.Restored) restored.Add(c); };
+            // Nothing settles, so nothing is announced: no debit followed by a restore, which
+            // used to make a failed purchase look like two real movements to any subscriber.
+            var seen = new List<ResourceChange>();
+            bag.Changed += seen.Add;
 
             var ok = bag.TrySpendAll(new (ResourceDefinition, int)[] { (gold, 3), (gem, 99) }, "buy");
 
             Assert.IsFalse(ok);
-            Assert.AreEqual(10, bag.GetAmount(gold));
+            Assert.AreEqual(10, bag.GetAmount(gold), "the affordable entry was never charged");
             Assert.AreEqual(10, bag.GetAmount(gem));
-            Assert.AreEqual(1, restored.Count, "only the resource that actually moved is restored");
+            Assert.AreEqual(0, seen.Count, "a transaction that did not happen emits no events");
             bag.Dispose();
         }
 

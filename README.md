@@ -422,6 +422,49 @@ Worth knowing:
 - Rules attached after construction (`bag.AttachRule`) do not get `LoadState` — the
   constructor has already run. Amounts still restore normally.
 
+## Transactions
+
+Every public mutation runs as a transaction. Rules execute for real inside it — substituting,
+waving a cost through, rejecting, emitting side effects — but their writes land on a tentative
+layer, and reads (`GetAmount`, `HasAtLeast`, and therefore every rule) see that layer. The
+whole set is written only if it clears:
+
+```csharp
+bool ok = bag.TrySpendAll(new[] { (coinDef, 30), (gemDef, 1) }, "buy");
+// not enough gems → ok is false, coin was never charged, and no Changed event was raised
+```
+
+Why the entries run rather than being pre-checked against balances: balances do not decide the
+outcome. A `SubstituteRule` can pay a cost the balance cannot cover, a free-pass rule can waive
+it, and a rule can reject a spend the balance could afford. Running them on a tentative layer
+is also what makes two entries competing for the same substitute resolve correctly — the second
+is judged against what the first already took.
+
+Consequences worth knowing:
+
+- **A failed transaction leaves no trace and announces nothing.** There is no debit-then-restore
+  pair to filter out, which is what made a rolled-back purchase look like two real movements.
+- **A failed single `TrySpend` no longer lets its rules' side effects land.** Before, a debit
+  that failed on a short balance (rather than an outright `Reject`) still paid out whatever its
+  rules credited.
+- **`Changed` fires after the write, in order, once per accepted mutation.** A handler reading
+  `GetAmount` inside the callback already sees the settled value.
+- A handler may call back into the bag; that re-entry is bounded by `MaxSideEffectDepth` like a
+  rule's side effect.
+- **Rule *state* is not transactional.** A rule that marks its one-shot as used during a failed
+  transaction stays marked — amounts roll back, rule state does not.
+
+### Binding one resource
+
+```csharp
+_unbind = bag.Bind(coinDef, amount => label.text = amount.ToString());   // OnDestroy: _unbind()
+```
+
+Fires only when the amount actually moves — a credit clamped at the cap reports a zero delta to
+`Changed` (analytics wants it) but is not a change to bind against — and never for a
+transaction that failed. Nothing is pushed at subscribe time: read `GetAmount` for the current
+value. `ResourceBag<TKey>` has the same method keyed by enum.
+
 ## Remote config
 
 A resource list that arrives as data rather than as authored assets — an event reward, an IAP
@@ -584,7 +627,7 @@ stream never carries nulls and the call sites still missing a breadcrumb stay gr
 
 `BagReasons` (Core) and `RuleReasons` (Rules) expose well-known reason strings.
 **System reasons are prefixed with `_`** to distinguish them from project reasons:
-`BagReasons.Restored` (`_restored`), `BagReasons.Overflow` (`_overflow`),
+`BagReasons.Overflow` (`_overflow`), `BagReasons.Unspecified` (`_unspecified`),
 `RuleReasons.Periodic` (`_periodic` — emitted by `PeriodicDeltaRule` for either
 direction; the accompanying `Delta`'s sign says which), `RuleReasons.ResolveBundle`
 (`_resolve_bundle`). `_expire` no longer exists anywhere in compiled code — expiry

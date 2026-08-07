@@ -471,7 +471,7 @@ public class ExpireRule : ResourceRule
 ## Reasons (well-known strings)
 
 `BagReasons` (Core) and `RuleReasons` (Rules) expose constants for emitted reasons.
-**System reasons prefixed with `_`:** `_restored`, `_overflow` (`BagReasons`);
+**System reasons prefixed with `_`:** `_overflow`, `_unspecified` (`BagReasons`);
 `_periodic`, `_resolve_bundle` (`RuleReasons`). `_regen` / `_decay` / `_expire` /
 `_substitute` no longer exist anywhere in compiled code — `_periodic` covers both
 directions of `PeriodicDeltaRule`, and expiry lives only in the Recipes above.
@@ -491,7 +491,9 @@ Project reason strings should NOT start with `_`.
 
 5. **Lowering max amount does NOT auto-clamp existing amount.** If `bag.GetAmount(def) = 500` and you call `bag.SetMaxAmount(def, 100)`, the amount stays at 500. Future Adds find no headroom (overflow event fires). Clamp manually if your design requires it.
 
-6. **`TrySpendAll` snapshots even for a single item.** The rollback snapshot is taken before the loop runs regardless of `items.Count`. A lone entry that fails on insufficient balance (rather than `SpendOutcome.Reject`) has already let its rules' side effects run before that balance check failed, so there is still something to undo even with one entry. Single-entry `TrySpend` (not `TrySpendAll`) is never rolled back.
+6. **Every mutation is a transaction; a failure writes nothing and announces nothing.** Entries run against a tentative layer — rules execute for real and their reads see that layer, so two entries competing for one balance resolve in order — and the set is committed only if all of it clears. There is no debit-then-restore pair any more, and a failed single `TrySpend` no longer lets its rules' side effects land. What is *not* transactional: **rule state** (a one-shot marked used during a failed transaction stays marked) and `SetMaxAmount`.
+    - `Changed` fires after the write, so a handler reading `GetAmount` sees the settled value; handler re-entry is bounded by `MaxSideEffectDepth`.
+    - `bag.Bind(def, amount => …)` returns an unsubscribe `Action`, fires only on a real change (zero-delta overflow does not count), never for a failed transaction, and pushes nothing at subscribe time.
 
 7. **`SpendOutcome.Reject` aborts EVERYTHING.** Side-effects accumulated during the same pipeline call are discarded. Use `Continue`/`Substitute` when secondary effects should fire — there is no `Skip`; set `SkipPrimary` on a debit for the same free-pass effect.
 
