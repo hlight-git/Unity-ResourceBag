@@ -205,13 +205,33 @@ namespace Hlight.ResourceBag.Tests
             Assert.IsTrue(_bag.TryGetAttached<PeriodicDeltaRule.Instance>(_energy, out var regen));
             regen.IntervalSec = 10f;
 
+            // Lịch đã đặt từ constructor (chu kỳ 1s) vẫn bắn theo mốc cũ — đổi chu kỳ không restart
+            // countdown đang chờ.
             _clock.Advance(1);
             _bag.Tick();
-            Assert.AreEqual(0, _bag.GetAmount(_energy), "1s không còn đủ khi chu kỳ là 10s");
+            Assert.AreEqual(1, _bag.GetAmount(_energy), "mốc đang chờ vẫn bắn theo lịch cũ");
+
+            // Từ lần bắn đó trở đi mới theo chu kỳ mới.
+            _clock.Advance(1);
+            _bag.Tick();
+            Assert.AreEqual(1, _bag.GetAmount(_energy), "1s không còn đủ khi chu kỳ đã là 10s");
 
             _clock.Advance(9);
             _bag.Tick();
-            Assert.AreEqual(1, _bag.GetAmount(_energy));
+            Assert.AreEqual(2, _bag.GetAmount(_energy));
+        }
+
+        [Test]
+        public void IntervalSec_Set_DoesNotRestartPendingCountdown()
+        {
+            Assert.IsTrue(_bag.TryGetAttached<PeriodicDeltaRule.Instance>(_energy, out var regen));
+            var scheduled = regen.NextFireAt;
+
+            _clock.Advance(0.5);
+            regen.IntervalSec = 10f;
+
+            Assert.AreEqual(scheduled, regen.NextFireAt, 1e-6,
+                "dời mốc bắn khi đổi chu kỳ = mỗi lần boot áp remote config là xoá sạch countdown đã lưu");
         }
 
         [Test]

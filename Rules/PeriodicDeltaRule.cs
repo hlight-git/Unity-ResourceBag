@@ -58,27 +58,18 @@ namespace Hlight.ResourceBag.Rules
             /// đếm ngược — không có nó thì consumer phải dựng bộ đếm thứ hai và hai cái sẽ lệch.</summary>
             public double NextFireAt => State.nextFireAt;
 
-            private float _intervalSec;
-
             /// <summary>
             /// Chu kỳ đang áp, giây. Gieo từ asset lúc attach; ghi đè được lúc chạy (remote config).
             /// Ghi vào instance chứ không vào <c>_cfg</c> vì SO dùng chung giữa mọi bag — và trong
             /// Editor, ghi vào SO là ghi vào file asset.
             /// </summary>
             /// <remarks>
-            /// Set lại mốc bắn kế theo <c>now</c> ngay khi đổi: mốc cũ được tính từ chu kỳ cũ nên
-            /// hết ý nghĩa một khi chu kỳ vừa đổi — một auto-property trơn sẽ để mốc cũ đứng
-            /// nguyên và bắn đúng lịch cũ dù chu kỳ đã đổi, sai với remote config.
+            /// Đổi chu kỳ KHÔNG dời mốc bắn đang chờ, và đó là chủ ý: người áp giá trị này là một lần
+            /// boot đọc remote config, ngay sau khi <see cref="OnStateLoaded"/> vừa khôi phục mốc bắn từ
+            /// save. Dời mốc ở đây là xoá countdown đã lưu ở mỗi lần mở app — người chơi chờ gần hết một
+            /// chu kỳ rồi tắt app sẽ quay lại vạch xuất phát, mãi mãi. Chu kỳ mới áp từ lần bắn kế trở đi.
             /// </remarks>
-            public float IntervalSec
-            {
-                get => _intervalSec;
-                set
-                {
-                    _intervalSec = value;
-                    State.nextFireAt = Bag.Clock.Now + value;
-                }
-            }
+            public float IntervalSec { get; set; }
 
             public Instance(PeriodicDeltaRule cfg, ResourceDefinition owner, ResourceBag bag)
                 : base(cfg, owner, bag)
