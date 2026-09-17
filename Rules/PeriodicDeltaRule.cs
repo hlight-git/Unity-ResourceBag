@@ -37,13 +37,16 @@ namespace Hlight.ResourceBag.Rules
         public override AttachedRule Attach(ResourceBag bag, ResourceDefinition owner)
             => owner != null ? new Instance(this, owner, bag) : null;
 
+        // Public only because Instance (below) is now public too, and a base class must be at
+        // least as accessible as the class deriving from it — the field itself stays reachable
+        // solely through the base's `protected State`, which Instance does not re-expose.
         [Serializable]
-        private sealed class PeriodicState
+        public sealed class PeriodicState
         {
             public double nextFireAt;
         }
 
-        private sealed class Instance : AttachedRule<PeriodicState>
+        public sealed class Instance : AttachedRule<PeriodicState>
         {
             // Backstop against a corrupt or cross-epoch next-fire time.
             private const int MaxCatchUpFires = 100_000;
@@ -51,11 +54,38 @@ namespace Hlight.ResourceBag.Rules
 
             private readonly PeriodicDeltaRule _cfg;
 
+            /// <summary>Mốc bắn kế, trên timeline của <see cref="ResourceBag.Clock"/>. Để vẽ đồng hồ
+            /// đếm ngược — không có nó thì consumer phải dựng bộ đếm thứ hai và hai cái sẽ lệch.</summary>
+            public double NextFireAt => State.nextFireAt;
+
+            private float _intervalSec;
+
+            /// <summary>
+            /// Chu kỳ đang áp, giây. Gieo từ asset lúc attach; ghi đè được lúc chạy (remote config).
+            /// Ghi vào instance chứ không vào <c>_cfg</c> vì SO dùng chung giữa mọi bag — và trong
+            /// Editor, ghi vào SO là ghi vào file asset.
+            /// </summary>
+            /// <remarks>
+            /// Set lại mốc bắn kế theo <c>now</c> ngay khi đổi: mốc cũ được tính từ chu kỳ cũ nên
+            /// hết ý nghĩa một khi chu kỳ vừa đổi — một auto-property trơn sẽ để mốc cũ đứng
+            /// nguyên và bắn đúng lịch cũ dù chu kỳ đã đổi, sai với remote config.
+            /// </remarks>
+            public float IntervalSec
+            {
+                get => _intervalSec;
+                set
+                {
+                    _intervalSec = value;
+                    State.nextFireAt = Bag.Clock.Now + value;
+                }
+            }
+
             public Instance(PeriodicDeltaRule cfg, ResourceDefinition owner, ResourceBag bag)
                 : base(cfg, owner, bag)
             {
                 _cfg = cfg;
-                State.nextFireAt = bag.Clock.Now + cfg.intervalSec;
+                IntervalSec = cfg.intervalSec;
+                State.nextFireAt = bag.Clock.Now + IntervalSec;
             }
 
             // Falls back to the field's own default: an empty key would make the bag treat this
@@ -77,12 +107,12 @@ namespace Hlight.ResourceBag.Rules
                     $"[ResourceBag] PeriodicDeltaRule state '{StateKey}' for '{Owner?.Id}' is " +
                     $"implausible ({State.nextFireAt:F0} against now {now:F0}) — treating as a " +
                     "first run. Usually a corrupt save or an IBagClock whose epoch differs.");
-                State.nextFireAt = now + _cfg.intervalSec;
+                State.nextFireAt = now + IntervalSec;
             }
 
             public override void OnTick(double now)
             {
-                if (_cfg.intervalSec <= 0f || _cfg.amountPerInterval == 0) return;
+                if (IntervalSec <= 0f || _cfg.amountPerInterval == 0) return;
 
                 // Blocked: reset the countdown instead of banking the interval.
                 if (_cfg.amountPerInterval > 0)
@@ -90,13 +120,13 @@ namespace Hlight.ResourceBag.Rules
                     var cap = Bag.GetMaxAmount(Owner);
                     if (cap > 0 && Bag.GetAmount(Owner) >= cap)
                     {
-                        State.nextFireAt = now + _cfg.intervalSec;
+                        State.nextFireAt = now + IntervalSec;
                         return;
                     }
                 }
                 else if (Bag.GetAmount(Owner) <= 0)
                 {
-                    State.nextFireAt = now + _cfg.intervalSec;
+                    State.nextFireAt = now + IntervalSec;
                     return;
                 }
 
@@ -105,7 +135,7 @@ namespace Hlight.ResourceBag.Rules
                 // Clamp in double space BEFORE the cast: casting an out-of-range double
                 // to int is undefined in an unchecked context and can yield int.MinValue,
                 // which would make every guard below useless.
-                var raw = (now - State.nextFireAt) / _cfg.intervalSec + 1.0;
+                var raw = (now - State.nextFireAt) / IntervalSec + 1.0;
                 if (raw < 1.0) raw = 1.0;
                 if (raw > MaxCatchUpFires) raw = MaxCatchUpFires;
                 var missed = (int)raw;
@@ -129,8 +159,8 @@ namespace Hlight.ResourceBag.Rules
                     if (spend > 0) Bag.TrySpend(Owner, spend, RuleReasons.Periodic);
                 }
 
-                State.nextFireAt += missed * (double)_cfg.intervalSec;
-                if (State.nextFireAt <= now) State.nextFireAt = now + _cfg.intervalSec;
+                State.nextFireAt += missed * (double)IntervalSec;
+                if (State.nextFireAt <= now) State.nextFireAt = now + IntervalSec;
             }
         }
     }

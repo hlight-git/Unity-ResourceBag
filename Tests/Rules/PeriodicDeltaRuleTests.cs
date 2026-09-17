@@ -169,5 +169,55 @@ namespace Hlight.ResourceBag.Tests
             Assert.DoesNotThrow(() => _bag.Tick());
             Assert.AreEqual(0, _bag.GetAmount(_energy));
         }
+
+        [Test]
+        public void NextFireAt_AdvancesOneInterval_AfterFiring()
+        {
+            Assert.IsTrue(_bag.TryGetAttached<PeriodicDeltaRule.Instance>(_energy, out var regen));
+            var before = regen.NextFireAt;
+
+            _clock.Advance(1);
+            _bag.Tick();
+
+            Assert.AreEqual(before + 1.0, regen.NextFireAt, 1e-6);
+        }
+
+        [Test]
+        public void NextFireAt_ResetsWhileAtCap_SoDrainingCostsAFullInterval()
+        {
+            Assert.IsTrue(_bag.TryGetAttached<PeriodicDeltaRule.Instance>(_energy, out var regen));
+
+            // Đầy cap, rồi ngồi đó thêm 50s. Countdown phải reset theo, không tích nợ.
+            _clock.Advance(100);
+            _bag.Tick();
+            Assert.AreEqual(5, _bag.GetAmount(_energy));
+
+            _clock.Advance(50);
+            _bag.Tick();
+
+            Assert.AreEqual(_clock.Now + 1.0, regen.NextFireAt, 1e-6,
+                "đầy cap thì mốc bắn phải bám theo now, không đứng lại ở quá khứ");
+        }
+
+        [Test]
+        public void IntervalSec_ChangedAtRuntime_NextFireUsesNewInterval()
+        {
+            Assert.IsTrue(_bag.TryGetAttached<PeriodicDeltaRule.Instance>(_energy, out var regen));
+            regen.IntervalSec = 10f;
+
+            _clock.Advance(1);
+            _bag.Tick();
+            Assert.AreEqual(0, _bag.GetAmount(_energy), "1s không còn đủ khi chu kỳ là 10s");
+
+            _clock.Advance(9);
+            _bag.Tick();
+            Assert.AreEqual(1, _bag.GetAmount(_energy));
+        }
+
+        [Test]
+        public void TryGetAttached_WrongOwner_ReturnsFalse()
+        {
+            Assert.IsFalse(_bag.TryGetAttached<PeriodicDeltaRule.Instance>(null, out _));
+        }
     }
 }

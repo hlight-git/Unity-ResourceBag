@@ -332,6 +332,24 @@ namespace Hlight.ResourceBag
         }
 
         /// <summary>
+        /// Instance rule đã attach cho <paramref name="owner"/>, hoặc false khi không có. Cách duy
+        /// nhất đọc được trạng thái sống của một rule — mốc bắn kế của một rule hồi theo thời gian là
+        /// thứ UI phải vẽ, và nó chỉ tồn tại trong instance chứ không trong SO.
+        /// </summary>
+        public bool TryGetAttached<T>(ResourceDefinition owner, out T rule) where T : AttachedRule
+        {
+            for (int i = 0; i < _rules.Count; i++)
+            {
+                if (_rules[i].Owner != owner || _rules[i] is not T typed) continue;
+                rule = typed;
+                return true;
+            }
+
+            rule = null;
+            return false;
+        }
+
+        /// <summary>
         /// Drive rule ticks. Project owns cadence — call from Update / FixedUpdate / a
         /// task driver. <see cref="Clock"/> is read once and shared by every rule.
         /// </summary>
