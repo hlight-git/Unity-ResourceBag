@@ -55,8 +55,14 @@ namespace Hlight.ResourceBag.Rules
             private readonly PeriodicDeltaRule _cfg;
 
             /// <summary>Mốc bắn kế, trên timeline của <see cref="ResourceBag.Clock"/>. Để vẽ đồng hồ
-            /// đếm ngược — không có nó thì consumer phải dựng bộ đếm thứ hai và hai cái sẽ lệch.</summary>
-            public double NextFireAt => State.nextFireAt;
+            /// đếm ngược — không có nó thì consumer phải dựng bộ đếm thứ hai và hai cái sẽ lệch.
+            /// Ghi được để consumer lùi mốc về quá khứ khi một cú tiêu được quyết toán muộn hơn lúc
+            /// nó thật sự xảy ra; tick kế tự bắt kịp các lần bắn đã lỡ.</summary>
+            public double NextFireAt
+            {
+                get => State.nextFireAt;
+                set => State.nextFireAt = value;
+            }
 
             /// <summary>
             /// Chu kỳ đang áp, giây. Gieo từ asset lúc attach; ghi đè được lúc chạy (remote config).
